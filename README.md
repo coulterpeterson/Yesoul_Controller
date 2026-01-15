@@ -1,6 +1,6 @@
 # Yesoul Keyboard Controller
 
-This project allows you to use a Yesoul S3 spin bike as a game controller. It intercepts the bike's Bluetooth data using an ESP32 and simulates keyboard presses on your computer via USB.
+This project allows you to use a Yesoul S3 (or hopefully G1M Plus) spin bike as a game controller. It intercepts the bike's Bluetooth data using an ESP32 and simulates keyboard presses on your computer via USB. Shoutout to https://github.com/Raelx/Yesoul_BLE for the original codebase.
 
 **How it works:**
 1.  **Pedaling**: Holds down `W`.
@@ -9,7 +9,7 @@ This project allows you to use a Yesoul S3 spin bike as a game controller. It in
 ## Prerequisites
 
 ### Hardware
-*   **Yesoul S3 (or hopefully G1M Plus) Bike** (or compatible FTMS Bluetooth bike).
+*   **Yesoul Bike** (or compatible FTMS Bluetooth bike).
 *   **ESP32 Development Board** (e.g., ESP32-WROOM, NodeMCU-32S).
 *   **USB C Cable** (data capable) to connect ESP32 to computer.
 
