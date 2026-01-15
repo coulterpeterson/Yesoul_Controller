@@ -1,228 +1,146 @@
-/** NimBLE_Server Demo:
+/** Yesoul to Keyboard Controller
  *
-This is working to broadcast Power and Cadence under the Cycling Power Service Profile
-Data tested against Edge and Phone
- * 
-*/
+ * Connects to Yesoul S3 bike (Fitness Machine Service), reads data,
+ * and sends commands over Serial to a companion Python script to simulate key
+ * presses.
+ *
+ * Protocol:
+ * ">>> CMD"  -> Actionable command for Python script
+ * "LOG: msg" -> Informational message for User display
+ *
+ * Logic:
+ * - Cadence > 0  -> Hold 'W'
+ * - Speed > 15km/h -> Hold 'B' (in addition to W)
+ */
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 
-short powerInstantaneous = 0;
-short cadenceInstantaneous = 0;
-short speedInstantaneous = 0;
-float powerScale = 1.28; // incoming power is multiplied by this value for correction
-short resistance = 0; //Not currently doing anything with this value after receiving it
-bool notify = false;
+// Config
+const float SPEED_THRESHOLD_KMH = 15.0;
+const int MIN_CADENCE_RPM = 1; // Minimum cadence to trigger 'W'
 
-// Define stuff for the Client that will receive data from Fitness Machine
-// The remote service we wish to connect to.
+// State tracking
+bool w_key_active = false;
+bool b_key_active = false;
+
+// Bike connection details
 static BLEUUID serviceUUID("1826"); // Fitness Machine
-// The characteristic of the remote service we are interested in.
-static BLEUUID charUUID("2ad2"); // Indoor Bike (Fitness Machine)
+static BLEUUID charUUID("2ad2");    // Indoor Bike Data
 
 static boolean doConnect = false;
 static boolean connected = false;
 static boolean doScan = false;
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
-/* 
- * Server Stuff
- */
-static NimBLEServer *pServer;
-/**  None of these are required as they will be handled by the library with defaults. **
- **                       Remove as you see fit for your needs                        */
-class ServerCallbacks : public NimBLEServerCallbacks
-{
-  void onConnect(NimBLEServer *pServer)
-  {
-    Serial.println("Client connected");
-    Serial.println("Multi-connect support: start advertising");
-    NimBLEDevice::startAdvertising();
-  };
-  /** Alternative onConnect() method to extract details of the connection. 
-     *  See: src/ble_gap.h for the details of the ble_gap_conn_desc struct.
-     */
-  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc)
-  {
-    Serial.print("Client address: ");
-    Serial.println(NimBLEAddress(desc->peer_ota_addr).toString().c_str());
-    /** We can use the connection handle here to ask for different connection parameters.
-         *  Args: connection handle, min connection interval, max connection interval
-         *  latency, supervision timeout.
-         *  Units; Min/Max Intervals: 1.25 millisecond increments.
-         *  Latency: number of intervals allowed to skip.
-         *  Timeout: 10 millisecond increments, try for 5x interval time for best results.  
-         */
-    pServer->updateConnParams(desc->conn_handle, 24, 48, 0, 60);
-  };
-  void onDisconnect(NimBLEServer *pServer)
-  {
-    Serial.println("Client disconnected - start advertising");
-    NimBLEDevice::startAdvertising();
-  };
-  void onMTUChange(uint16_t MTU, ble_gap_conn_desc *desc)
-  {
-    Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, desc->conn_handle);
-  };
-};
 
-/** Handler class for characteristic actions */
-class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
-{
-  void onRead(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.print(pCharacteristic->getUUID().toString().c_str());
-    Serial.print(": onRead(), value: ");
-    Serial.println(pCharacteristic->getValue().c_str());
-  };
+// Helper to send formatted commands to the Python script
+void sendCommand(const char *cmd) { Serial.printf(">>> %s\n", cmd); }
 
-  void onWrite(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.print(pCharacteristic->getUUID().toString().c_str());
-    Serial.print(": onWrite(), value: ");
-    Serial.println(pCharacteristic->getValue().c_str());
-  };
-  /** Called before notification or indication is sent, 
-     *  the value can be changed here before sending if desired.
-     */
-  void onNotify(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.println("Sending notification to clients");
-  };
-
-  /** The status returned in status is defined in NimBLECharacteristic.h.
-     *  The value returned in code is the NimBLE host return code.
-     */
-  void onStatus(NimBLECharacteristic *pCharacteristic, Status status, int code)
-  {
-    String str = ("Notification/Indication status code: ");
-    str += status;
-    str += ", return code: ";
-    str += code;
-    str += ", ";
-    str += NimBLEUtils::returnCodeToString(code);
-    Serial.println(str);
-  };
-
-  void onSubscribe(NimBLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc, uint16_t subValue)
-  {
-    String str = "Client ID: ";
-    str += desc->conn_handle;
-    str += " Address: ";
-    str += std::string(NimBLEAddress(desc->peer_ota_addr)).c_str();
-    if (subValue == 0)
-    {
-      str += " Unsubscribed to ";
-    }
-    else if (subValue == 1)
-    {
-      str += " Subscribed to notifications for ";
-    }
-    else if (subValue == 2)
-    {
-      str += " Subscribed to indications for ";
-    }
-    else if (subValue == 3)
-    {
-      str += " Subscribed to notifications and indications for ";
-    }
-    str += std::string(pCharacteristic->getUUID()).c_str();
-
-    Serial.println(str);
-  };
-};
-
-/** Handler class for descriptor actions */
-class DescriptorCallbacks : public NimBLEDescriptorCallbacks
-{
-  void onWrite(NimBLEDescriptor *pDescriptor)
-  {
-    std::string dscVal = pDescriptor->getValue();
-    Serial.print("Descriptor witten value:");
-    Serial.println(dscVal.c_str());
-  };
-
-  void onRead(NimBLEDescriptor *pDescriptor)
-  {
-    Serial.print(pDescriptor->getUUID().toString().c_str());
-    Serial.println(" Descriptor read");
-  };
-};
-/* 
- * Client Stuff
- */
-// This callback is for when data is received from Server
-static void notifyCallback(
-    BLERemoteCharacteristic *pBLERemoteCharacteristic,
-    uint8_t *pData,
-    size_t length,
-    bool isNotify)
-{
-  powerInstantaneous = pData[11] | pData[12] << 8;       // 2 bytes of power
-  Serial.printf("Power = %d\n", powerInstantaneous);
-  powerInstantaneous = powerInstantaneous * powerScale;  //power value correction
-  cadenceInstantaneous = (pData[4] | pData[5] << 8) / 2; // 2 bytes of power in 0.5 resolution RPM, convert to RPM
-  resistance = pData[9];                                 // 1 byte of resistance
-  Serial.printf("Power = %d | Cadence = %d | Resistance = %d\n", powerInstantaneous, cadenceInstantaneous, resistance);
+// Helper to send log messages to the Python script
+void sendLog(const char *format, ...) {
+  char buffer[128];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+  Serial.printf("LOG: %s\n", buffer);
 }
 
-/**  None of these are required as they will be handled by the library with defaults. **
- **                       Remove as you see fit for your needs                        */
-class MyClientCallback : public BLEClientCallbacks
-{
-  void onConnect(BLEClient *pclient)
-  {
+// Reset keys when disconnected
+void releaseAllKeys() {
+  if (w_key_active) {
+    sendCommand("W_OFF");
+    w_key_active = false;
+  }
+  if (b_key_active) {
+    sendCommand("B_OFF");
+    b_key_active = false;
+  }
+}
+
+static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic,
+                           uint8_t *pData, size_t length, bool isNotify) {
+
+  // Expected format for Indoor Bike Data (0x2AD2):
+  // Bytes 0-1: Flags
+  // Bytes 2-3: Speed (uint16, 0.01 km/h)
+  // Bytes 4-5: Cadence (uint16, 0.5 rpm)
+
+  if (length < 6)
+    return;
+
+  uint16_t speedRaw = pData[2] | (pData[3] << 8);
+  float speedKmh = speedRaw * 0.01;
+
+  uint16_t cadenceRaw = pData[4] | (pData[5] << 8);
+  int cadenceRpm = cadenceRaw / 2; // Scaled by 0.5
+
+  // Send status update for user visibility
+  sendLog("Speed: %.2f km/h | Cadence: %d rpm", speedKmh, cadenceRpm);
+
+  // Logic for 'W' Key (Pedaling)
+  if (cadenceRpm >= MIN_CADENCE_RPM) {
+    if (!w_key_active) {
+      sendCommand("W_ON");
+      w_key_active = true;
+    }
+  } else {
+    // If we stopped pedaling
+    if (w_key_active) {
+      sendCommand("W_OFF");
+      w_key_active = false;
+    }
   }
 
-  void onDisconnect(BLEClient *pclient)
-  {
+  // Logic for 'B' Key (Speeding)
+  if (speedKmh > SPEED_THRESHOLD_KMH) {
+    if (!b_key_active) {
+      sendCommand("B_ON");
+      b_key_active = true;
+    }
+  } else {
+    if (b_key_active) {
+      sendCommand("B_OFF");
+      b_key_active = false;
+    }
+  }
+}
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient *pclient) { sendLog("Connected to Bike"); }
+
+  void onDisconnect(BLEClient *pclient) {
     connected = false;
-    Serial.println("onDisconnect");
+    sendLog("Disconnected from Bike");
+    releaseAllKeys(); // Safety release
   }
 };
 
-bool connectToServer()
-{
-  Serial.print("Forming a connection to ");
-  Serial.println(myDevice->getAddress().toString().c_str());
+bool connectToServer() {
+  sendLog("Forming a connection to %s",
+          myDevice->getAddress().toString().c_str());
 
   BLEClient *pClient = BLEDevice::createClient();
-  Serial.println(" - Created client");
-
   pClient->setClientCallbacks(new MyClientCallback());
 
-  // Connect to the remove BLE Server.
-  pClient->connect(myDevice); // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
-  Serial.println(" - Connected to server");
+  // Connect to the remote BLE Server.
+  pClient->connect(myDevice);
+  sendLog("Connected to server");
 
-  // Obtain a reference to the service we are after in the remote BLE server.
   BLERemoteService *pRemoteService = pClient->getService(serviceUUID);
-  if (pRemoteService == nullptr)
-  {
-    Serial.print("Failed to find our service UUID: ");
-    Serial.println(serviceUUID.toString().c_str());
+  if (pRemoteService == nullptr) {
+    sendLog("Failed to find our service UUID: %s",
+            serviceUUID.toString().c_str());
     pClient->disconnect();
     return false;
   }
-  Serial.println(" - Found our service");
 
-  // Obtain a reference to the characteristic in the service of the remote BLE server.
   pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
-  if (pRemoteCharacteristic == nullptr)
-  {
-    Serial.print("Failed to find our characteristic UUID: ");
-    Serial.println(charUUID.toString().c_str());
+  if (pRemoteCharacteristic == nullptr) {
+    sendLog("Failed to find our characteristic UUID: %s",
+            charUUID.toString().c_str());
     pClient->disconnect();
     return false;
-  }
-  Serial.println(" - Found our characteristic");
-
-  // Read the value of the characteristic.
-  if (pRemoteCharacteristic->canRead())
-  {
-    std::string value = pRemoteCharacteristic->readValue();
-    Serial.print("The characteristic value was: ");
-    Serial.println(value.c_str());
   }
 
   if (pRemoteCharacteristic->canNotify())
@@ -232,183 +150,52 @@ bool connectToServer()
   return true;
 }
 
-/**
- * Scan for BLE servers and find the first one that advertises the service we are looking for.
- */
-class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks
-{
-  /**
-   * Called for each advertising BLE server.
-   */
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice *advertisedDevice) {
+    // sendLog("BLE Advertised Device found: %s",
+    // advertisedDevice->toString().c_str());
 
-  /*** Only a reference to the advertised device is passed now
-  void onResult(BLEAdvertisedDevice advertisedDevice) { **/
-  void onResult(BLEAdvertisedDevice *advertisedDevice)
-  {
-    Serial.print("BLE Advertised Device found: ");
-    Serial.println(advertisedDevice->toString().c_str());
-
-    // We have found a device, let us now see if it contains the service we are looking for.
-    /********************************************************************************
-    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
-********************************************************************************/
-    if (advertisedDevice->haveServiceUUID() && advertisedDevice->isAdvertisingService(serviceUUID))
-    {
-
+    if (advertisedDevice->haveServiceUUID() &&
+        advertisedDevice->isAdvertisingService(serviceUUID)) {
       BLEDevice::getScan()->stop();
-      /*******************************************************************
-      myDevice = new BLEAdvertisedDevice(advertisedDevice);
-*******************************************************************/
-      myDevice = advertisedDevice; /** Just save the reference now, no need to copy the object */
+      myDevice = advertisedDevice;
       doConnect = true;
       doScan = true;
-
-    } // Found our server
-  }   // onResult
-};    // MyAdvertisedDeviceCallbacks
-
-//delays for X ms, should not block execution
-void softDelay(unsigned long delayTime)
-{
-  unsigned long startTime = millis();
-  while ((millis() - startTime) < delayTime)
-  {
-    //wait
+      sendLog("Found Yesoul Bike! Stopping scan and connecting...");
+    }
   }
-}
+};
 
-/** Define callback instances globally to use for multiple Charateristics \ Descriptors */
-// This section is for the Server that will broadcast the data as Cycling Power
-static DescriptorCallbacks dscCallbacks;
-static CharacteristicCallbacks chrCallbacks;
-NimBLECharacteristic *CyclingPowerFeature = NULL;
-NimBLECharacteristic *CyclingPowerMeasurement = NULL;
-NimBLECharacteristic *CyclingPowerSensorLocation = NULL;
-unsigned char bleBuffer[8];
-unsigned char slBuffer[1];
-unsigned char fBuffer[4];
-unsigned short revolutions = 0;
-unsigned short timestamp = 0;
-unsigned short flags = 0x20;
-byte sensorlocation = 0x0D;
-long lastNotify = 0;
-long lastRevolution = 0;
-
-void setup()
-{
+void setup() {
   Serial.begin(115200);
-  Serial.println("Starting NimBLE Server");
+  sendLog("Starting Yesoul Keyboard Controller...");
 
-  /** sets device name */
-  NimBLEDevice::init("Yesoul_CP");
-  /** Optional: set the transmit power, default is 3db */
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9); /** +9db */
+  NimBLEDevice::init("");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
-  pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
-
-  fBuffer[0] = 0x00;
-  fBuffer[1] = 0x00;
-  fBuffer[2] = 0x00;
-  fBuffer[3] = 0x08;
-
-  slBuffer[0] = sensorlocation & 0xff;
-
-  NimBLEService *pDeadService = pServer->createService("1818");
-  CyclingPowerFeature = pDeadService->createCharacteristic(
-      "2A65",
-      NIMBLE_PROPERTY::READ);
-  CyclingPowerSensorLocation = pDeadService->createCharacteristic(
-      "2A5D",
-      NIMBLE_PROPERTY::READ);
-  CyclingPowerMeasurement = pDeadService->createCharacteristic(
-      "2A63",
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-
-  CyclingPowerFeature->setValue(fBuffer, 4);
-  CyclingPowerSensorLocation->setValue(slBuffer, 1);
-  CyclingPowerMeasurement->setValue(slBuffer, 1);
-
-  /** Start the services when finished creating all Characteristics and Descriptors */
-  pDeadService->start();
-
-  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-  /** Add the services to the advertisment data **/
-  pAdvertising->addServiceUUID(pDeadService->getUUID());
-  pAdvertising->setScanResponse(true);
-  pAdvertising->start();
-
-  Serial.println("Advertising Started");
-
-  Serial.println("Starting Arduino BLE Client application...");
-  BLEDevice::init("");
-
-  // Retrieve a Scanner and set the callback we want to use to be informed when we
-  // have detected a new device.  Specify that we want active scanning and start the
-  // scan to run for 5 seconds.
   BLEScan *pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setInterval(1349);
   pBLEScan->setWindow(449);
   pBLEScan->setActiveScan(true);
   pBLEScan->start(5, false);
+  sendLog("Scanning for fitness machine...");
 }
 
-void loop()
-{
-  // If the flag "doConnect" is true then we have scanned for and found the desired
-  // BLE Server with which we wish to connect.  Now we connect to it.  Once we are
-  // connected we set the connected flag to be true.
-  if (doConnect == true)
-  {
-    if (connectToServer())
-    {
-      Serial.println("We are now connected to the BLE Server.");
-    }
-    else
-    {
-      Serial.println("We have failed to connect to the server; there is nothin more we will do.");
+void loop() {
+  if (doConnect == true) {
+    if (connectToServer()) {
+      sendLog("We are now connected to the BLE Server.");
+    } else {
+      sendLog("We have failed to connect to the server.");
     }
     doConnect = false;
   }
-  // If we are connected to a peer BLE Server, update the characteristic each time we are reached
-  // with the current time since boot.
-  if (connected)
-  {
-    //Stuff to do when connected to Client
-  }
-  else if (doScan)
-  {
-    BLEDevice::getScan()->start(0); // this is just sample to start scan after disconnect, most likely there is better way to do it in arduino
+
+  if (!connected && doScan) {
+    // Retry scan if lost
+    BLEDevice::getScan()->start(0);
   }
 
-  // convert RPM to timestamp
-  if (cadenceInstantaneous != 0 && (millis()) >= (lastRevolution + (60000 / cadenceInstantaneous)))
-  {
-    revolutions++;                                  // One crank revolution should have passed, add one revolution
-    timestamp = (unsigned short)(((millis() * 1024) / 1000) % 65536); // create timestamp and format
-    lastRevolution = millis();
-  }
-
-  if (millis() - lastNotify >= 1000) // do this every second
-  {
-    if (pServer->getConnectedCount() > 0)
-    {
-      bleBuffer[0] = flags & 0xff;
-      bleBuffer[1] = (flags >> 8) & 0xff;
-      bleBuffer[2] = powerInstantaneous & 0xff;
-      bleBuffer[3] = (powerInstantaneous >> 8) & 0xff;
-      bleBuffer[4] = revolutions & 0xff;
-      bleBuffer[5] = (revolutions >> 8) & 0xff;
-      bleBuffer[6] = timestamp & 0xff;
-      bleBuffer[7] = (timestamp >> 8) & 0xff;
-      CyclingPowerMeasurement->setValue(bleBuffer, 8);
-      CyclingPowerMeasurement->notify();
-      lastNotify = millis();
-    }
-  }
-  if (pServer->getConnectedCount() == 0)
-  {
-    powerInstantaneous = 0;
-  }
+  delay(10);
 }

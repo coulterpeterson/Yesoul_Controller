@@ -1,26 +1,89 @@
-# Yesoul_BLE
+# Yesoul Keyboard Controller
 
-# Summary
-This project uses an ESP32 board to receive data from a Yesoul S3 spin bike and rebroadcast it in a format that works with a Garmin Edge cycle computer or Garmin Watch that supports BLE sensors.
+This project allows you to use a Yesoul S3 spin bike as a game controller. It intercepts the bike's Bluetooth data using an ESP32 and simulates keyboard presses on your computer via USB.
 
-# Required Libraries
-* [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino)
-* Arduino
+**How it works:**
+1.  **Pedaling**: Holds down `W`.
+2.  **Pedaling Fast (> 15 km/h)**: Holds down `B` (Boost) + `W`.
 
-# Hardware
-* ESP32 board of some type, no headers needed
+## Prerequisites
 
-# Details
-The goal here is to allow the connection of an indoor bike (AKA spin bike, exercise bike) to a Garmin Edge Cyclings computer. While this should work with any indoor bike using 
-This is needed as the Yesoul bike broadcasts under the [Fitness Machine Service](https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/) and the Garmin Edge/watch will not receive this profile. So this project receives the Fitness Machine data converts the cadence and power data as needed and rebroadcasts this data under the [Cycling Power Service](https://www.bluetooth.com/specifications/specs/cycling-power-service-1-1/).
+### Hardware
+*   **Yesoul S3 (or hopefully G1M Plus) Bike** (or compatible FTMS Bluetooth bike).
+*   **ESP32 Development Board** (e.g., ESP32-WROOM, NodeMCU-32S).
+*   **USB C Cable** (data capable) to connect ESP32 to computer.
 
-This solution is currently crafted to this one spin bike and if the bike is not broadcasting the exact same combination of data/flags it may not work. The proper solution to this would be to read the flags coming from the Yesoul and then knowing what data fields are present parse the incoming data correctly.
+### Software
+*   **VSCode** with **PlatformIO** extension (for flashing the ESP32).
+*   **Python 3.x** (for running the bridge script on your computer).
 
-# Known Limitations
-Currently this connects to the first device it sees with the Fitness Machine Service UUID (0x1826), and Indoor Bike characteristic UUID (0x2ad2). I'm not sure what would happen if there were two devices in range matching this.
+---
 
-# Future Goals
-* Add speed data from spin bike. This will require adding the Cycling Speed and Cadence Service
+## Setup Guide
 
-# References
-This is a great write up on understanding the Cycling Power Service, [Arduino BLE Cycling Power Service Blog Post](https://teaandtechtime.com/arduino-ble-cycling-power-service)
+### 1. Flash the ESP32
+The ESP32 firmware handles the Bluetooth connection to the bike.
+
+1.  Open this folder in VSCode.
+2.  Ensure the **PlatformIO** extension is installed. It will automatically install the required libraries (`NimBLE-Arduino`) defined in `platformio.ini`.
+3.  Connect your ESP32 to your Mac.
+4.  Click the **PlatformIO Alien Icon** (sidebar) -> **Project Tasks** -> **env:esp32dev** -> **General** -> **Upload**.
+5.  Wait for the "SUCCESS" message.
+
+### 2. Setup Python Bridge
+The Python script listens to the ESP32 over USB and presses keys.
+
+#### Mac / Linux
+It's recommended to use a virtual environment to avoid system package errors.
+
+1.  Open a terminal in this folder.
+2.  Create a virtual environment:
+    ```bash
+    python3 -m venv venv
+    ```
+3.  Activate it:
+    ```bash
+    source venv/bin/activate
+    ```
+4.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+### 3. Usage
+
+1.  **Wake up the bike**: Start pedaling to wake up the Yesoul bike's Bluetooth.
+2.  **Connect ESP32**: Plug the ESP32 into your computer.
+3.  **Run the Script**:
+    ```bash
+    # (Ensure venv is active)
+    python serial_to_keyboard.py
+    ```
+    *The script will attempt to auto-detect the ESP32 port.*
+
+4.  **Pairing**:
+    -   The script output will show: `[STATUS] Scanning for fitness machine...`
+    -   When it finds the bike, it will say: `[STATUS] Found Yesoul Bike! ... Connected`.
+    -   **Note**: If it doesn't find it, ensure your phone is NOT connected to the bike. The bike can only connect to one device at a time.
+
+5.  **Ride**:
+    -   Pedal to trigger `W`.
+    -   Pedal faster (>15kph) to trigger `B`.
+    -   You will see real-time stats in the terminal: `[STATUS] Speed: 20.5 km/h | Cadence: 80 rpm`.
+
+---
+
+## Troubleshooting
+
+-   **"error: externally-managed-environment"**: Use the virtual environment steps above (step 2).
+-   **Script can't find ESP32**:
+    -   Find the port manually: `ls /dev/tty.*` (look for `SLAB_USBtoUART` or `usbserial`).
+    -   Run specific port: `python serial_to_keyboard.py /dev/tty.SLAB_USBtoUART`
+-   **Keys not pressing**:
+    -   Mac requires **Accessibility Permissions** for the terminal to control the keyboard.
+    -   Go to **System Settings** -> **Privacy & Security** -> **Accessibility**.
+    -   Allow **Terminal** (or VSCode/iTerm).
+-   **Bike not connecting**:
+    -   Restart ESP32 (Press 'EN' button).
+    -   Unplug bike power for 10s.
+    -   Turn off Bluetooth on your phone/tablet.
