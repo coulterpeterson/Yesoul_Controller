@@ -50,6 +50,21 @@ It's recommended to use a virtual environment to avoid system package errors.
     pip install -r requirements.txt
     ```
 
+#### Windows
+1.  Open PowerShell or Command Prompt in this folder.
+2.  Create a virtual environment:
+    ```bash
+    python -m venv venv
+    ```
+3.  Activate it:
+    ```bash
+    .\venv\Scripts\activate
+    ```
+4.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
 ### 3. Usage
 
 1.  **Wake up the bike**: Start pedaling to wake up the Yesoul bike's Bluetooth.
