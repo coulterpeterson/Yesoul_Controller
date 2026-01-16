@@ -11,8 +11,10 @@
 #include <NimBLEDevice.h>
 #include <USB.h>
 #include <USBHIDKeyboard.h>
+#include <USBHIDMouse.h>
 
 USBHIDKeyboard Keyboard;
+USBHIDMouse Mouse;
 
 // Config
 const float SPEED_THRESHOLD_KMH = 30.0;
@@ -20,7 +22,7 @@ const int MIN_CADENCE_RPM = 1;
 
 // State tracking
 bool w_key_active = false;
-bool b_key_active = false;
+bool mouse_active = false;
 
 static BLEUUID serviceUUID("1826"); // Fitness Machine
 static BLEUUID charUUID("2ad2");    // Indoor Bike Data
@@ -46,10 +48,10 @@ void releaseAllKeys() {
     w_key_active = false;
     sendLog("Released W");
   }
-  if (b_key_active) {
-    Keyboard.release('b');
-    b_key_active = false;
-    sendLog("Released B");
+  if (mouse_active) {
+    Mouse.release(MOUSE_LEFT);
+    mouse_active = false;
+    sendLog("Released Mouse Click");
   }
 }
 
@@ -70,7 +72,7 @@ static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic,
     lastStatsLog = millis();
   }
 
-  // --- KEYBOARD LOGIC ---
+  // --- KEYBOARD/MOUSE LOGIC ---
 
   // W Key (Pedaling)
   if (cadenceRpm >= MIN_CADENCE_RPM) {
@@ -87,18 +89,18 @@ static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic,
     }
   }
 
-  // B Key (Speeding)
+  // Mouse Left Click (Speeding)
   if (speedKmh > SPEED_THRESHOLD_KMH) {
-    if (!b_key_active) {
-      Keyboard.press('b');
-      b_key_active = true;
-      sendLog("Holding B");
+    if (!mouse_active) {
+      Mouse.press(MOUSE_LEFT);
+      mouse_active = true;
+      sendLog("Holding Mouse Left");
     }
   } else {
-    if (b_key_active) {
-      Keyboard.release('b');
-      b_key_active = false;
-      sendLog("Released B");
+    if (mouse_active) {
+      Mouse.release(MOUSE_LEFT);
+      mouse_active = false;
+      sendLog("Released Mouse Left");
     }
   }
 }
@@ -154,10 +156,11 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
 void setup() {
   Serial.begin(115200);
   Keyboard.begin();
+  Mouse.begin();
   USB.begin(); // Start Native USB stack
 
   delay(1000);
-  sendLog("Starting Native USB Keyboard Mode...");
+  sendLog("Starting Native USB Keyboard/Mouse Mode...");
 
   NimBLEDevice::init("");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
