@@ -1,42 +1,36 @@
-/** Yesoul to Keyboard Controller
+/** Yesoul to Native USB Keyboard
  *
  * Connects to Yesoul S3 bike (Fitness Machine Service), reads data,
- * and sends commands over Serial to a companion Python script to simulate key
- * presses.
+ * and sends NATIVE KEYSTROKES via the ESP32-S3 USB Port.
  *
- * Protocol:
- * ">>> CMD"  -> Actionable command for Python script
- * "LOG: msg" -> Informational message for User display
- *
- * Logic:
- * - Cadence > 0  -> Hold 'W'
- * - Speed > 15km/h -> Hold 'B' (in addition to W)
+ * HARDWARE REQUIREMENT:
+ * You must plug the USB cable into the "USB" or "OTG" port of the ESP32-S3
+ * for keystrokes to work. The "UART" port is only for debugging/uploading.
  */
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <USB.h>
+#include <USBHIDKeyboard.h>
+
+USBHIDKeyboard Keyboard;
 
 // Config
-const float SPEED_THRESHOLD_KMH = 15.0;
-const int MIN_CADENCE_RPM = 1; // Minimum cadence to trigger 'W'
+const float SPEED_THRESHOLD_KMH = 30.0;
+const int MIN_CADENCE_RPM = 1;
 
 // State tracking
 bool w_key_active = false;
 bool b_key_active = false;
 
-// Bike connection details
 static BLEUUID serviceUUID("1826"); // Fitness Machine
 static BLEUUID charUUID("2ad2");    // Indoor Bike Data
 
 static boolean doConnect = false;
 static boolean connected = false;
-static boolean doScan = false;
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
 
-// Helper to send formatted commands to the Python script
-void sendCommand(const char *cmd) { Serial.printf(">>> %s\n", cmd); }
-
-// Helper to send log messages to the Python script
+// Helper to send logs to Serial (debugging)
 void sendLog(const char *format, ...) {
   char buffer[128];
   va_list args;
@@ -46,26 +40,21 @@ void sendLog(const char *format, ...) {
   Serial.printf("LOG: %s\n", buffer);
 }
 
-// Reset keys when disconnected
 void releaseAllKeys() {
   if (w_key_active) {
-    sendCommand("W_OFF");
+    Keyboard.release('w');
     w_key_active = false;
+    sendLog("Released W");
   }
   if (b_key_active) {
-    sendCommand("B_OFF");
+    Keyboard.release('b');
     b_key_active = false;
+    sendLog("Released B");
   }
 }
 
 static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic,
                            uint8_t *pData, size_t length, bool isNotify) {
-
-  // Expected format for Indoor Bike Data (0x2AD2):
-  // Bytes 0-1: Flags
-  // Bytes 2-3: Speed (uint16, 0.01 km/h)
-  // Bytes 4-5: Cadence (uint16, 0.5 rpm)
-
   if (length < 6)
     return;
 
@@ -73,72 +62,72 @@ static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic,
   float speedKmh = speedRaw * 0.01;
 
   uint16_t cadenceRaw = pData[4] | (pData[5] << 8);
-  int cadenceRpm = cadenceRaw / 2; // Scaled by 0.5
+  int cadenceRpm = cadenceRaw / 2;
 
-  // Send status update for user visibility
-  sendLog("Speed: %.2f km/h | Cadence: %d rpm", speedKmh, cadenceRpm);
+  static unsigned long lastStatsLog = 0;
+  if (millis() - lastStatsLog > 1000) {
+    sendLog("Speed: %.2f km/h | Cadence: %d rpm", speedKmh, cadenceRpm);
+    lastStatsLog = millis();
+  }
 
-  // Logic for 'W' Key (Pedaling)
+  // --- KEYBOARD LOGIC ---
+
+  // W Key (Pedaling)
   if (cadenceRpm >= MIN_CADENCE_RPM) {
     if (!w_key_active) {
-      sendCommand("W_ON");
+      Keyboard.press('w');
       w_key_active = true;
+      sendLog("Holding W");
     }
   } else {
-    // If we stopped pedaling
     if (w_key_active) {
-      sendCommand("W_OFF");
+      Keyboard.release('w');
       w_key_active = false;
+      sendLog("Released W");
     }
   }
 
-  // Logic for 'B' Key (Speeding)
+  // B Key (Speeding)
   if (speedKmh > SPEED_THRESHOLD_KMH) {
     if (!b_key_active) {
-      sendCommand("B_ON");
+      Keyboard.press('b');
       b_key_active = true;
+      sendLog("Holding B");
     }
   } else {
     if (b_key_active) {
-      sendCommand("B_OFF");
+      Keyboard.release('b');
       b_key_active = false;
+      sendLog("Released B");
     }
   }
 }
 
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient *pclient) { sendLog("Connected to Bike"); }
-
   void onDisconnect(BLEClient *pclient) {
     connected = false;
     sendLog("Disconnected from Bike");
-    releaseAllKeys(); // Safety release
+    releaseAllKeys();
   }
 };
 
 bool connectToServer() {
   sendLog("Forming a connection to %s",
           myDevice->getAddress().toString().c_str());
-
   BLEClient *pClient = BLEDevice::createClient();
   pClient->setClientCallbacks(new MyClientCallback());
-
-  // Connect to the remote BLE Server.
   pClient->connect(myDevice);
   sendLog("Connected to server");
 
   BLERemoteService *pRemoteService = pClient->getService(serviceUUID);
   if (pRemoteService == nullptr) {
-    sendLog("Failed to find our service UUID: %s",
-            serviceUUID.toString().c_str());
     pClient->disconnect();
     return false;
   }
 
   pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
   if (pRemoteCharacteristic == nullptr) {
-    sendLog("Failed to find our characteristic UUID: %s",
-            charUUID.toString().c_str());
     pClient->disconnect();
     return false;
   }
@@ -152,23 +141,23 @@ bool connectToServer() {
 
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice *advertisedDevice) {
-    // sendLog("BLE Advertised Device found: %s",
-    // advertisedDevice->toString().c_str());
-
     if (advertisedDevice->haveServiceUUID() &&
         advertisedDevice->isAdvertisingService(serviceUUID)) {
       BLEDevice::getScan()->stop();
       myDevice = advertisedDevice;
       doConnect = true;
-      doScan = true;
-      sendLog("Found Yesoul Bike! Stopping scan and connecting...");
+      sendLog("FOUND TARGET BIKE! Connecting...");
     }
   }
 };
 
 void setup() {
   Serial.begin(115200);
-  sendLog("Starting Yesoul Keyboard Controller...");
+  Keyboard.begin();
+  USB.begin(); // Start Native USB stack
+
+  delay(1000);
+  sendLog("Starting Native USB Keyboard Mode...");
 
   NimBLEDevice::init("");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -178,24 +167,31 @@ void setup() {
   pBLEScan->setInterval(1349);
   pBLEScan->setWindow(449);
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(5, false);
-  sendLog("Scanning for fitness machine...");
+
+  pBLEScan->start(0, nullptr);
 }
 
 void loop() {
-  if (doConnect == true) {
+  if (doConnect) {
     if (connectToServer()) {
-      sendLog("We are now connected to the BLE Server.");
+      sendLog("Currently connected.");
     } else {
-      sendLog("We have failed to connect to the server.");
+      BLEDevice::getScan()->start(0, nullptr);
     }
     doConnect = false;
   }
 
-  if (!connected && doScan) {
-    // Retry scan if lost
-    BLEDevice::getScan()->start(0);
+  if (!connected && !doConnect && !BLEDevice::getScan()->isScanning()) {
+    BLEDevice::getScan()->start(0, nullptr);
   }
 
-  delay(10);
+  // Heartbeat
+  static unsigned long lastLog = 0;
+  if (millis() - lastLog > 5000) {
+    if (!connected)
+      sendLog("Status: Scanning... (Use OTG port for Keyboard)");
+    lastLog = millis();
+  }
+
+  delay(100);
 }
